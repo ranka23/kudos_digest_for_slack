@@ -1,10 +1,10 @@
 import { App } from '@slack/bolt'
 import { db } from '../services/database'
 import { aiService } from '../services/ai'
-import { parseKudosCommand, generateKudosId, SUPPORTED_EMOJIS, formatKudosForGoogleDocs } from '../utils/helpers'
+import { parseKudosCommand, generateKudosId, SUPPORTED_EMOJIS, formatKudosForGoogleDocs, kudosToCsv } from '../utils/helpers'
 import type { Kudos } from '../types/index'
 
-export async function getChannelIdFromName(teamId: string, channelName: string, client: { conversations: { list: (_params: { team_id: string; types?: string }) => Promise<unknown> }; info: (_params: { channel: string }) => Promise<unknown> } | null): Promise<string | null> {
+export async function getChannelIdFromName(teamId: string, channelName: string, client: { conversations: { list: (_params: { team_id: string; types?: string }) => Promise<unknown> } } | null): Promise<string | null> {
   if (!client?.conversations?.list) return null
 
   try {
@@ -15,7 +15,7 @@ export async function getChannelIdFromName(teamId: string, channelName: string, 
     const channels = (channelsResponse as { channels?: { id: string; name: string }[] }).channels ?? []
     const channel = channels.find((c) => c.name === channelName.toLowerCase())
     return channel?.id ?? null
-  } catch (error) {
+  } catch {
     return null
   }
 }
@@ -25,6 +25,14 @@ async function isAuthorizedForKudos(userId: string, kudos: { fromUserId: string 
   const result = await client.users.info({ user: userId })
   const user = result as { user?: { is_admin?: boolean } }
   return !!user.user?.is_admin
+}
+
+async function refreshHomeForUser(_userId: string, _workspaceId: string): Promise<void> {
+  // This function publishes the updated home view for a user.
+  // It is called after kudos creation, edit, or deletion.
+  // Implementation is a no-op here because the `app_home_opened` event handler
+  // will publish the home view when the user opens their App Home tab.
+  // We keep this function as a hook point for future proactive home updates.
 }
 
 export function registerListeners(app: App): void {
@@ -90,6 +98,12 @@ export function registerListeners(app: App): void {
     }
   })
 
+  app.command('/kudos-export', async ({ command, ack, respond, client }) => {
+    await ack()
+
+    const workspaceId = command.team_id
+    const parts = command.text.trim().split(/\s+/)
+
     const startDate = parts[0] ?? ''
     const endDate = parts[1] ?? ''
     const channelName = parts[2] ?? ''
@@ -108,7 +122,7 @@ export function registerListeners(app: App): void {
 
       let kudosList: Kudos[]
       if (channelName && channelName.startsWith('@')) {
-        const channelId = await getChannelIdFromName(command.channel_id, channelName.replace(/^@/, ''), command.client)
+        const channelId = await getChannelIdFromName(command.channel_id, channelName.replace(/^@/, ''), client)
         if (channelId) {
           kudosList = await db.getKudosByDateRangeAndChannel(workspaceId, start, end, channelId)
         } else {
@@ -649,18 +663,6 @@ export function registerListeners(app: App): void {
   })
 }
 
-function kudosToCsv(kudosList: { fromUser: string; toUser: string; reason: string; emoji: string; channel: string; date: string }[]): string {
-  const header = 'From User,To User,Reason,Emoji,Channel,Date\n'
-  const rows = kudosList
-    .map((k) => {
-      const needsQuotes = k.reason.includes(',') || k.reason.includes('"')
-      const escapedReason = needsQuotes ? `"${k.reason.replace(/"/g, '""')}"` : k.reason
-      return `${k.fromUser},${k.toUser},${escapedReason},${k.emoji},${k.channel},${k.date}`
-    })
-    .join('\n')
-
-  return header + rows
-}
 
 function buildHomeView(
   kudosList: { toUserId?: string; toUserName: string; reason: string; emoji: string; createdAt: string }[],

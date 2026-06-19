@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import Database from 'node:sqlite'
 import DatabaseService from '../src/services/database'
 import type { Kudos, Settings } from '../src/types'
 

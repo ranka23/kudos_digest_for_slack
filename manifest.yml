@@ -1,5 +1,6 @@
 _metadata:
-  version: 1
+  major_version: 2
+  minor_version: 1
 
 display_information:
   name: Kudos Digest
@@ -32,9 +33,6 @@ features:
       usage_hint: "[start_date] [end_date] [@channel_name]"
       should_escape: false
 
-  unfurl_domains: []
-  task_expanded_bot_dm: false
-
 oauth_config:
   scopes:
     bot:
@@ -49,15 +47,13 @@ oauth_config:
       - im:read
       - im:write
       - mpim:read
-      - workflow:write
 
 settings:
-  allowed_ip_addresses: []
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false
   event_subscriptions:
     bot_events:
       - app_home_opened
-      - workflow_run_executed
   interactivity:
     is_enabled: true
-  org_deploy_enabled: false
-  token_rotation_enabled: false

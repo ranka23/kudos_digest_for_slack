@@ -1,0 +1,51 @@
+{
+  "name": "kudos-digest",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "A Slack app that captures kudos and sends weekly digests",
+  "main": "dist/index.js",
+  "bin": {
+    "kudos-digest": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "lint": "eslint src --ext .ts,.tsx",
+    "lint:fix": "eslint src --ext .ts,.tsx --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "keywords": [
+    "slack",
+    "kudos",
+    "recognition",
+    "digest",
+    "bot"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@slack/bolt": "^4.7.2",
+    "dotenv": "^16.4.5",
+    "openai": "^4.96.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@slack/types": "^2.21.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.18",
+    "@typescript-eslint/eslint-plugin": "^8.60.1",
+    "@typescript-eslint/parser": "^8.60.1",
+    "@vitest/coverage-v8": "^3.1.1",
+    "eslint": "^9.25.0",
+    "globals": "^17.6.0",
+    "prettier": "^3.5.3",
+    "tsx": "^4.19.1",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.1"
+  }
+}

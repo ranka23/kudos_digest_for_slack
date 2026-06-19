@@ -1,0 +1,68 @@
+_metadata:
+  version: 1
+
+display_information:
+  name: Kudos Digest
+  description: Capture kudos and generate weekly digests
+  background_color: "#4A154B"
+
+features:
+  app_home:
+    home_tab_enabled: true
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+
+  bot_user:
+    display_name: Kudos Digest
+    always_online: false
+
+  slash_commands:
+    - command: /kudos
+      description: Give kudos to teammates
+      usage_hint: "@user1 @user2 [reason] [:emoji:]"
+      should_escape: false
+
+    - command: /kudos-export
+      description: Export kudos to CSV
+      usage_hint: "[start_date] [end_date]"
+      should_escape: false
+
+    - command: /kudos-export-google
+      description: Export kudos formatted for Google Docs/Sheets
+      usage_hint: "[start_date] [end_date]"
+      should_escape: false
+
+  unfurl_domains: []
+  task_expanded_bot_dm: false
+
+  app_unfurls:
+    - domain: ""
+
+  messages_menu: {}
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - chat:write.public
+      - commands
+      - users:read
+      - users:read.email
+      - channels:read
+      - groups:read
+      - im:read
+      - im:write
+      - mpim:read
+      - workflow:write
+
+settings:
+  allowed_ip_addresses: []
+  event_subscriptions:
+    bot_events:
+      - app_home_opened
+      - workflow_run_executed
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false

@@ -24,21 +24,16 @@ features:
 
     - command: /kudos-export
       description: Export kudos to CSV
-      usage_hint: "[start_date] [end_date]"
+      usage_hint: "[start_date] [end_date] [@channel_name]"
       should_escape: false
 
     - command: /kudos-export-google
       description: Export kudos formatted for Google Docs/Sheets
-      usage_hint: "[start_date] [end_date]"
+      usage_hint: "[start_date] [end_date] [@channel_name]"
       should_escape: false
 
   unfurl_domains: []
   task_expanded_bot_dm: false
-
-  app_unfurls:
-    - domain: ""
-
-  messages_menu: {}
 
 oauth_config:
   scopes:

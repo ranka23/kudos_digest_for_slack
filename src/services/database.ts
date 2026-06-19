@@ -91,6 +91,15 @@ class DatabaseService {
     return rows
   }
 
+  async getKudosByDateRangeAndChannel(workspaceId: string, startDate: string, endDate: string, channelId: string): Promise<Kudos[]> {
+    if (!this.db) throw new Error('Database not initialized')
+    const stmt = this.db.prepare(
+      'SELECT * FROM kudos WHERE workspaceId = ? AND createdAt >= ? AND createdAt <= ? AND channelId = ? ORDER BY createdAt DESC'
+    )
+    const rows = stmt.all(workspaceId, startDate, endDate, channelId) as unknown as Kudos[]
+    return rows
+  }
+
   async getKudosById(id: string): Promise<Kudos | null> {
     if (!this.db) throw new Error('Database not initialized')
     const stmt = this.db.prepare('SELECT * FROM kudos WHERE id = ?')

@@ -68,6 +68,12 @@ pnpm start
 
 ```
 /kudos-export 2024-01-01 2024-01-31
+/kudos-export 2024-01-01 2024-01-31 @channel-name
+```
+
+### Export Kudos with Channel Filter
+```
+/kudos-export-google 2024-01-01 2024-01-31 @channel-name
 ```
 
 ### Configure Settings

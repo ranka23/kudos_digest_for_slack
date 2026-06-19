@@ -4,33 +4,19 @@ import { aiService } from '../services/ai'
 import { parseKudosCommand, generateKudosId, SUPPORTED_EMOJIS, formatKudosForGoogleDocs } from '../utils/helpers'
 import type { Kudos } from '../types/index'
 
-export async function refreshHomeForUser(userId: string, teamId: string): Promise<void> {
-  const workspaceId = teamId
-  const appClient = (global as unknown as { app?: { client: { views: { publish: (_params: { user_id: string; view: { type: string; callback_id: string; blocks: unknown } }) => Promise<void> } } } }).app?.client
-
-  if (!appClient?.views?.publish) {
-    return
-  }
+export async function getChannelIdFromName(teamId: string, channelName: string, client: { conversations: { list: (_params: { team_id: string; types?: string }) => Promise<unknown> }; info: (_params: { channel: string }) => Promise<unknown> } | null): Promise<string | null> {
+  if (!client?.conversations?.list) return null
 
   try {
-    const kudosList = await db.getKudosByWorkspace(workspaceId, 20)
-    const settings = await db.getSettings(workspaceId)
-
-    await appClient.views.publish({
-      user_id: userId,
-      view: {
-        type: 'home',
-        callback_id: 'home_view',
-        blocks: buildHomeView(kudosList, settings),
-      },
+    const channelsResponse = await client.conversations.list({
+      team_id: teamId,
+      types: 'public_channel,private_channel,mpim,im'
     })
+    const channels = (channelsResponse as { channels?: { id: string; name: string }[] }).channels ?? []
+    const channel = channels.find((c) => c.name === channelName.toLowerCase())
+    return channel?.id ?? null
   } catch (error) {
-    const err = error as { code?: string; data?: { error?: string } } | undefined
-    if (err?.code === 'not_enabled' || err?.data?.error === 'not_enabled') {
-      console.warn('Home tab not enabled; skipping home view refresh.')
-      return
-    }
-    console.error('Failed to refresh home view:', error)
+    return null
   }
 }
 

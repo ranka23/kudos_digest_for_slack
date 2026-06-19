@@ -90,18 +90,13 @@ export function registerListeners(app: App): void {
     }
   })
 
-  app.command('/kudos-export', async ({ command, ack, respond }) => {
-    await ack()
-
-    const workspaceId = command.team_id
-    const parts = command.text.trim().split(/\s+/)
-
     const startDate = parts[0] ?? ''
     const endDate = parts[1] ?? ''
+    const channelName = parts[2] ?? ''
 
     if (!startDate || !endDate) {
       await respond({
-        text: 'Usage: `/kudos-export YYYY-MM-DD YYYY-MM-DD`\nExample: `/kudos-export 2024-01-01 2024-01-31`',
+        text: 'Usage: `/kudos-export YYYY-MM-DD YYYY-MM-DD [@channel_name]`\nExample: `/kudos-export 2024-01-01 2024-01-31`\nExample: `/kudos-export 2024-01-01 2024-01-31 @channel-name`',
         response_type: 'ephemeral',
       })
       return
@@ -111,11 +106,25 @@ export function registerListeners(app: App): void {
       const start = new Date(startDate).toISOString()
       const end = new Date(endDate).toISOString()
 
-      const kudosList = await db.getKudosByDateRange(workspaceId, start, end)
+      let kudosList: Kudos[]
+      if (channelName && channelName.startsWith('@')) {
+        const channelId = await getChannelIdFromName(command.channel_id, channelName.replace(/^@/, ''), command.client)
+        if (channelId) {
+          kudosList = await db.getKudosByDateRangeAndChannel(workspaceId, start, end, channelId)
+        } else {
+          await respond({
+            text: `Channel ${channelName} not found in the workspace.\nPlease ensure the channel exists and the app is a member. Use /kudos-export without a channel to see all channels.`,
+            response_type: 'ephemeral',
+          })
+          return
+        }
+      } else {
+        kudosList = await db.getKudosByDateRange(workspaceId, start, end)
+      }
 
       if (kudosList.length === 0) {
         await respond({
-          text: `No kudos found between ${startDate} and ${endDate}.`,
+          text: `No kudos found${channelName ? ` in channel ${channelName}` : ''} between ${startDate} and ${endDate}.`,
           response_type: 'ephemeral',
         })
         return
@@ -139,7 +148,7 @@ export function registerListeners(app: App): void {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: `Here's your kudos export for ${startDate} to ${endDate}:`,
+              text: `Here's your kudos export for ${startDate} to ${endDate}${channelName ? ` in channel ${channelName}` : ''}:`,
             },
           },
           {
@@ -169,10 +178,11 @@ export function registerListeners(app: App): void {
 
     const startDate = parts[0] ?? ''
     const endDate = parts[1] ?? ''
+    const channelName = parts[2] ?? ''
 
     if (!startDate || !endDate) {
       await respond({
-        text: 'Usage: `/kudos-export-google YYYY-MM-DD YYYY-MM-DD`\nExample: `/kudos-export-google 2024-01-01 2024-01-31`',
+        text: 'Usage: `/kudos-export-google YYYY-MM-DD YYYY-MM-DD [@channel_name]`\nExample: `/kudos-export-google 2024-01-01 2024-01-31`\nExample: `/kudos-export-google 2024-01-01 2024-01-31 @channel-name`',
         response_type: 'ephemeral',
       })
       return
@@ -182,11 +192,25 @@ export function registerListeners(app: App): void {
       const start = new Date(startDate).toISOString()
       const end = new Date(endDate).toISOString()
 
-      const kudosList = await db.getKudosByDateRange(workspaceId, start, end)
+      let kudosList: Kudos[]
+      if (channelName && channelName.startsWith('@')) {
+        const channelId = await getChannelIdFromName(command.channel_id, channelName.replace(/^@/, ''), command.client)
+        if (channelId) {
+          kudosList = await db.getKudosByDateRangeAndChannel(workspaceId, start, end, channelId)
+        } else {
+          await respond({
+            text: `Channel ${channelName} not found in the workspace.\nPlease ensure the channel exists and the app is a member. Use /kudos-export-google without a channel to see all channels.`,
+            response_type: 'ephemeral',
+          })
+          return
+        }
+      } else {
+        kudosList = await db.getKudosByDateRange(workspaceId, start, end)
+      }
 
       if (kudosList.length === 0) {
         await respond({
-          text: `No kudos found between ${startDate} and ${endDate}.`,
+          text: `No kudos found${channelName ? ` in channel ${channelName}` : ''} between ${startDate} and ${endDate}.`,
           response_type: 'ephemeral',
         })
         return
@@ -215,7 +239,7 @@ export function registerListeners(app: App): void {
       )
 
       await respond({
-        text: `Google export for ${startDate} to ${endDate}:`,
+        text: `Google export for ${startDate} to ${endDate}${channelName ? ` in channel ${channelName}` : ''}:`,
         blocks: [
           {
             type: 'section',

@@ -157,6 +157,22 @@ export function formatDateForDisplay(date: string | Date): string {
   })
 }
 
+/**
+ * Parses a date string in mm-dd-yyyy format and returns a Date object.
+ * Returns null if the input is invalid.
+ */
+export function parseDateMMDDYYYY(dateStr: string): Date | null {
+  if (!dateStr) return null
+  const parts = dateStr.trim().split('-')
+  if (parts.length !== 3) return null
+  const month = parseInt(parts[0], 10)
+  const day = parseInt(parts[1], 10)
+  const year = parseInt(parts[2], 10)
+  if (isNaN(month) || isNaN(day) || isNaN(year)) return null
+  if (month < 1 || month > 12 || day < 1 || day > 31 || year < 1000) return null
+  return new Date(year, month - 1, day)
+}
+
 export function formatKudosForGoogleDocs(
   kudosList: { reason: string; emoji: string; fromUserName: string; toUserName: string }[],
   startDate: string,

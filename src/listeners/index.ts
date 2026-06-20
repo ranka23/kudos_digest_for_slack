@@ -1,7 +1,7 @@
 import { App } from '@slack/bolt'
 import { db } from '../services/database'
 import { aiService } from '../services/ai'
-import { parseKudosCommand, generateKudosId, SUPPORTED_EMOJIS, formatKudosForGoogleDocs, kudosToCsv, validateKudosInput } from '../utils/helpers'
+import { parseKudosCommand, generateKudosId, SUPPORTED_EMOJIS, formatKudosForGoogleDocs, kudosToCsv, validateKudosInput, parseDateMMDDYYYY } from '../utils/helpers'
 import type { Kudos } from '../types/index'
 
 export async function getChannelIdFromName(teamId: string, channelName: string, client: { conversations: { list: (_params: { team_id: string; types?: string }) => Promise<unknown> } } | null): Promise<string | null> {
@@ -202,10 +202,11 @@ export function registerListeners(app: App): void {
       // Send a single consolidated in-channel message if any succeeded
       if (successMessages.length > 0) {
         const usersText = successMessages.join(', ')
-        const multiSuffix = successMessages.length > 1 ? ' each' : ''
+        const senderName = command.user_name || `<@${command.user_id}>`
+        const kudosLine = `*${emoji} "${reason}" ${emoji}*\nKudos to ${usersText} from ${senderName}`
         await client.chat.postMessage({
           channel: command.channel_id,
-          text: `:tada: Kudos given to ${usersText}${multiSuffix} for: "${reason}" ${emoji}`,
+          text: kudosLine,
         })
       }
 
@@ -255,18 +256,18 @@ export function registerListeners(app: App): void {
 
       if (!startDate || !endDate) {
         await respond({
-          text: 'Usage: `/kudos-export YYYY-MM-DD YYYY-MM-DD [@channel_name]`\nExample: `/kudos-export 2024-01-01 2024-01-31`\nExample: `/kudos-export 2024-01-01 2024-01-31 @channel-name`',
+          text: 'Usage: `/kudos-export [start_date: mm-dd-yyyy] [end_date: mm-dd-yyyy] [#channel_name]`\nExample: `/kudos-export 01-01-2024 01-31-2024`\nExample: `/kudos-export 01-01-2024 01-31-2024 #general`',
           response_type: 'ephemeral',
         })
         return
       }
 
-      // Validate date format
-      const start = new Date(startDate)
-      const end = new Date(endDate)
-      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      // Validate date format (mm-dd-yyyy)
+      const start = parseDateMMDDYYYY(startDate)
+      const end = parseDateMMDDYYYY(endDate)
+      if (!start || !end) {
         await respond({
-          text: '❌ Invalid date format. Please use YYYY-MM-DD format.\nExample: `/kudos-export 2024-01-01 2024-01-31`',
+          text: '❌ Invalid date format. Please use mm-dd-yyyy format.\nExample: `/kudos-export 01-01-2024 01-31-2024`',
           response_type: 'ephemeral',
         })
         return
@@ -276,8 +277,8 @@ export function registerListeners(app: App): void {
       const endIso = end.toISOString()
 
       let kudosList: Kudos[]
-      if (channelName && channelName.startsWith('@')) {
-        const channelId = await getChannelIdFromName(command.channel_id, channelName.replace(/^@/, ''), client)
+      if (channelName && channelName.startsWith('#')) {
+        const channelId = await getChannelIdFromName(command.channel_id, channelName.replace(/^#/, ''), client)
         if (channelId) {
           kudosList = await db.getKudosByDateRangeAndChannel(workspaceId, startIso, endIso, channelId)
         } else {
@@ -353,18 +354,18 @@ export function registerListeners(app: App): void {
 
       if (!startDate || !endDate) {
         await respond({
-          text: 'Usage: `/kudos-export-google YYYY-MM-DD YYYY-MM-DD [@channel_name]`\nExample: `/kudos-export-google 2024-01-01 2024-01-31`\nExample: `/kudos-export-google 2024-01-01 2024-01-31 @channel-name`',
+          text: 'Usage: `/kudos-export-google [start_date: mm-dd-yyyy] [end_date: mm-dd-yyyy] [#channel_name]`\nExample: `/kudos-export-google 01-01-2024 01-31-2024`\nExample: `/kudos-export-google 01-01-2024 01-31-2024 #general`',
           response_type: 'ephemeral',
         })
         return
       }
 
-      // Validate date format
-      const start = new Date(startDate)
-      const end = new Date(endDate)
-      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      // Validate date format (mm-dd-yyyy)
+      const start = parseDateMMDDYYYY(startDate)
+      const end = parseDateMMDDYYYY(endDate)
+      if (!start || !end) {
         await respond({
-          text: '❌ Invalid date format. Please use YYYY-MM-DD format.\nExample: `/kudos-export-google 2024-01-01 2024-01-31`',
+          text: '❌ Invalid date format. Please use mm-dd-yyyy format.\nExample: `/kudos-export-google 01-01-2024 01-31-2024`',
           response_type: 'ephemeral',
         })
         return
@@ -374,8 +375,8 @@ export function registerListeners(app: App): void {
       const endIso = end.toISOString()
 
       let kudosList: Kudos[]
-      if (channelName && channelName.startsWith('@')) {
-        const channelId = await getChannelIdFromName(command.channel_id, channelName.replace(/^@/, ''), command.client)
+      if (channelName && channelName.startsWith('#')) {
+        const channelId = await getChannelIdFromName(command.channel_id, channelName.replace(/^#/, ''), command.client)
         if (channelId) {
           kudosList = await db.getKudosByDateRangeAndChannel(workspaceId, startIso, endIso, channelId)
         } else {
@@ -825,6 +826,76 @@ export function registerListeners(app: App): void {
     }
   })
 
+  app.action('open_about', async ({ ack, client, body }) => {
+    await ack()
+
+    const userId = (body as { user?: { id?: string } }).user?.id ?? ''
+
+    try {
+      await client.views.open({
+        trigger_id: (body as { trigger_id?: string }).trigger_id ?? '',
+        view: {
+          type: 'modal',
+          callback_id: 'about_modal',
+          title: {
+            type: 'plain_text',
+            text: 'About Kudos Digest',
+          },
+          blocks: buildAboutModal(),
+          close: {
+            type: 'plain_text',
+            text: 'Close',
+          },
+        },
+      })
+    } catch (error) {
+      console.error('Failed to open about modal:', error)
+      try {
+        await client.chat.postMessage({
+          channel: userId,
+          text: '❌ Failed to open About. Please try again.',
+        })
+      } catch {
+        console.error('Failed to send error message for about:', error)
+      }
+    }
+  })
+
+  app.action('open_donate', async ({ ack, client, body }) => {
+    await ack()
+
+    const userId = (body as { user?: { id?: string } }).user?.id ?? ''
+
+    try {
+      await client.views.open({
+        trigger_id: (body as { trigger_id?: string }).trigger_id ?? '',
+        view: {
+          type: 'modal',
+          callback_id: 'donate_modal',
+          title: {
+            type: 'plain_text',
+            text: 'Support Kudos Digest',
+          },
+          blocks: buildDonateModal(),
+          close: {
+            type: 'plain_text',
+            text: 'Close',
+          },
+        },
+      })
+    } catch (error) {
+      console.error('Failed to open donate modal:', error)
+      try {
+        await client.chat.postMessage({
+          channel: userId,
+          text: '❌ Failed to open Donate modal. Please try again.',
+        })
+      } catch {
+        console.error('Failed to send error message for donate:', error)
+      }
+    }
+  })
+
   app.action('manual_digest', async ({ ack, body, client }) => {
     await ack()
 
@@ -969,7 +1040,7 @@ function buildHomeView(
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: 'Give recognition to your teammates with `/kudos @user reason`',
+        text: 'Recognize and appreciate your teammates with kudos! Use `/kudos @user reason` to give kudos, and generate weekly digests to celebrate wins together.',
       },
     },
     {
@@ -997,6 +1068,120 @@ function buildHomeView(
             type: 'plain_text',
             text: 'Generate Weekly Digest',
           },
+        },
+        {
+          type: 'button',
+          action_id: 'open_about',
+          text: {
+            type: 'plain_text',
+            text: 'About',
+          },
+        },
+      ],
+    },
+  ]
+}
+
+function buildAboutModal(): any[] {
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: 'Kudos Digest helps your team recognize and celebrate great work. Give kudos to teammates and generate weekly digests to share wins across the channel.\n\n*Commands:*\n• `/kudos @user reason :emoji:` — Give kudos to a teammate\n• `/kudos-export [start: mm-dd-yyyy] [end: mm-dd-yyyy] [#channel]` — Export to CSV\n• `/kudos-export-google [start: mm-dd-yyyy] [end: mm-dd-yyyy] [#channel]` — Export for Google Docs/Sheets\n\n*Settings:*\n• *Digest Channel* — Where the weekly digest is posted\n• *Digest Day/Hour* — When the digest is posted (UTC)\n• *AI Provider* — Optional AI for creative digests (OpenAI, Anthropic, or Custom)\n• *Digest Style* — Simple (always available) or Creative (when AI is set up)\n\n*Use Cases:*\n• Recognize team achievements in real-time\n• Build a culture of appreciation\n• Track contributions over time with exports\n• Generate morale-boosting weekly summaries',
+      },
+    },
+    {
+      type: 'divider',
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '*GitHub Repository*\n<https://github.com/ranka23/kudos_digest_for_slack|View source code, report issues, or contribute>',
+      },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '*Support the Project* :heart:\nIf you find this app useful, consider supporting its development. Every contribution helps keep the project alive and growing.',
+      },
+    },
+    {
+      type: 'actions',
+      block_id: 'about_actions',
+      elements: [
+        {
+          type: 'button',
+          action_id: 'open_donate',
+          text: {
+            type: 'plain_text',
+            text: '❤️ Donate $1',
+          },
+          style: 'primary',
+        },
+      ],
+    },
+  ]
+}
+
+function buildDonateModal(): any[] {
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '☕ *Buy me a Coffee!*\n\nYour donations help me build better software. We accept Ethereum, Solana, USDC and USDT.',
+      },
+    },
+    {
+      type: 'section',
+      block_id: 'donate_eth_section',
+      text: {
+        type: 'mrkdwn',
+        text: '*🔷 ETH (Ethereum)*\n`0x907DB6Ad294bD6B9adAE4C2340d34883E32F121A`',
+      },
+    },
+    {
+      type: 'image',
+      title: {
+        type: 'plain_text',
+        text: 'ETH QR Code',
+      },
+      image_url: 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=ethereum:0x907DB6Ad294bD6B9adAE4C2340d34883E32F121A',
+      alt_text: 'QR code for ETH wallet address',
+    },
+    {
+      type: 'section',
+      block_id: 'donate_sol_section',
+      text: {
+        type: 'mrkdwn',
+        text: '*🟣 SOL (Solana)*\n`H9kw2HG3eik5uKYoULHuzohoY7gCi1Jfqk38ppn1Szyo`',
+      },
+    },
+    {
+      type: 'image',
+      title: {
+        type: 'plain_text',
+        text: 'SOL QR Code',
+      },
+      image_url: 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=solana:H9kw2HG3eik5uKYoULHuzohoY7gCi1Jfqk38ppn1Szyo',
+      alt_text: 'QR code for SOL wallet address',
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '*USDC / USDT* can be sent to the same addresses above on their respective networks.',
+      },
+    },
+    {
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: 'Open Source — <https://github.com/ranka23/kudos_digest_for_slack|Source Code>',
         },
       ],
     },
@@ -1101,12 +1286,13 @@ function buildSettingsModal(settings: {
     {
       type: 'input',
       block_id: 'ai_provider_block',
+      optional: true,
       element: {
         type: 'static_select',
         action_id: 'ai_provider',
         placeholder: {
           type: 'plain_text',
-          text: 'Select AI provider',
+          text: 'Select AI provider (optional)',
         },
         options: [
           { text: { type: 'plain_text', text: 'None (Simple Digest)' }, value: 'none' },
@@ -1116,7 +1302,7 @@ function buildSettingsModal(settings: {
         ],
         initial_option: settings?.aiProvider
           ? { text: { type: 'plain_text', text: getProviderName(settings.aiProvider) }, value: settings.aiProvider }
-          : undefined,
+          : { text: { type: 'plain_text', text: 'None (Simple Digest)' }, value: 'none' },
       },
       label: {
         type: 'plain_text',
@@ -1190,13 +1376,15 @@ function buildSettingsModal(settings: {
           type: 'plain_text',
           text: 'Select style',
         },
-        options: [
-          { text: { type: 'plain_text', text: 'Simple' }, value: 'simple' },
-          { text: { type: 'plain_text', text: 'Creative' }, value: 'creative' },
-        ],
-        initial_option: settings?.digestStyle
-          ? { text: { type: 'plain_text', text: settings.digestStyle === 'creative' ? 'Creative' : 'Simple' }, value: settings.digestStyle }
-          : undefined,
+        options: (settings?.aiProvider && settings.aiProvider !== 'none')
+          ? [
+              { text: { type: 'plain_text', text: 'Simple' }, value: 'simple' },
+              { text: { type: 'plain_text', text: 'Creative' }, value: 'creative' },
+            ]
+          : [
+              { text: { type: 'plain_text', text: 'Simple' }, value: 'simple' },
+            ],
+        initial_option: { text: { type: 'plain_text', text: 'Simple' }, value: 'simple' },
       },
       label: {
         type: 'plain_text',

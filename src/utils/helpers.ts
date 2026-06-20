@@ -35,7 +35,7 @@ export function parseKudosCommand(text: string): {
   let emoji = DEFAULT_EMOJI
 
   for (const part of parts) {
-    const mentionMatch = part.match(/^<@([A-Za-z0-9]+)(?:\|[^>]*)?>$/i)
+    const mentionMatch = part.match(/^<@([A-Za-z0-9]+)(?:\|[^>]*)?>$/i) || part.match(/^@([A-Za-z0-9][A-Za-z0-9._-]*)$/i)
     const emojiMatch = part.match(/^:(.+):$/)
 
     if (mentionMatch) {

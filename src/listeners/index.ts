@@ -1,7 +1,7 @@
 import { App } from '@slack/bolt'
 import { db } from '../services/database'
 import { aiService } from '../services/ai'
-import { parseKudosCommand, generateKudosId, SUPPORTED_EMOJIS, formatKudosForGoogleDocs, kudosToCsv } from '../utils/helpers'
+import { parseKudosCommand, generateKudosId, SUPPORTED_EMOJIS, formatKudosForGoogleDocs, kudosToCsv, validateKudosInput } from '../utils/helpers'
 import type { Kudos } from '../types/index'
 
 export async function getChannelIdFromName(teamId: string, channelName: string, client: { conversations: { list: (_params: { team_id: string; types?: string }) => Promise<unknown> } } | null): Promise<string | null> {
@@ -35,33 +35,149 @@ async function refreshHomeForUser(_userId: string, _workspaceId: string): Promis
   // We keep this function as a hook point for future proactive home updates.
 }
 
+/**
+ * Resolves @username strings to Slack user IDs by looking up the workspace user list.
+ * Supports matching by username, display name, or real name.
+ */
+async function resolveUserIds(
+  usernames: string[],
+  client: App['client']
+): Promise<{ resolved: Map<string, string>; resolvedNames: Map<string, string>; unresolved: string[] }> {
+  const resolved = new Map<string, string>()
+  const resolvedNames = new Map<string, string>()
+  const unresolved: string[] = []
+
+  try {
+    const result = await client.users.list({})
+    const members = (result as { members?: Array<{ id: string; name: string; profile?: { display_name?: string; real_name?: string } }> }).members ?? []
+
+    for (const username of usernames) {
+      // Skip if it's already a Slack user ID format (e.g., U0ABC123)
+      if (/^U[A-Za-z0-9]+$/.test(username) && username.length > 5) {
+        resolved.set(username, username)
+        // We don't know the name yet — fallback to user ID
+        resolvedNames.set(username, username)
+        continue
+      }
+
+      const member = members.find(m =>
+        m.name === username ||
+        m.profile?.display_name === username ||
+        m.profile?.real_name === username
+      )
+
+      if (member) {
+        resolved.set(username, member.id)
+        resolvedNames.set(username, member.profile?.display_name ?? member.profile?.real_name ?? member.name)
+      } else {
+        unresolved.push(username)
+      }
+    }
+  } catch (error) {
+    console.error('Failed to fetch user list:', error)
+    // If users.list fails, mark all as unresolved
+    unresolved.push(...usernames.filter(u => !/^U[A-Za-z0-9]+$/.test(u) || u.length <= 5))
+  }
+
+  return { resolved, resolvedNames, unresolved }
+}
+
+function formatErrorMessage(error: unknown): { userMessage: string; consoleMessage: string } {
+  const err = error as { code?: string; data?: { error?: string }; message?: string } | undefined
+  const apiError = err?.data?.error
+  const message = err?.message ?? 'Unknown error'
+
+  if (apiError === 'user_not_found') {
+    return {
+      userMessage: '❌ User not found. The user may have left the workspace or the username is incorrect. Please check the name and try again.',
+      consoleMessage: `User not found error: ${message}`,
+    }
+  }
+
+  if (apiError === 'not_in_channel') {
+    return {
+      userMessage: '❌ The bot is not in that channel. Please invite @Kudos Digest to the channel first, then try again.',
+      consoleMessage: `Bot not in channel: ${message}`,
+    }
+  }
+
+  if (apiError === 'invalid_auth' || apiError === 'account_inactive') {
+    return {
+      userMessage: '❌ Authentication error. The bot token may be invalid or expired. Please contact your workspace admin.',
+      consoleMessage: `Auth error: ${message}`,
+    }
+  }
+
+  if (apiError === 'ratelimited') {
+    return {
+      userMessage: '❌ Too many requests. Please wait a moment and try again.',
+      consoleMessage: `Rate limited: ${message}`,
+    }
+  }
+
+  if (err?.code === 'slack_webapi_platform_error') {
+    return {
+      userMessage: '❌ Slack API error. Please try again. If the issue persists, contact your workspace admin.',
+      consoleMessage: `Slack API error: ${message}`,
+    }
+  }
+
+  // Generic database or unexpected errors
+  if (message.includes('Database not initialized') || message.includes('SQLITE')) {
+    return {
+      userMessage: '❌ Database error. Please try again. If the issue persists, restart the app.',
+      consoleMessage: `Database error: ${message}`,
+    }
+  }
+
+  return {
+    userMessage: '❌ Something went wrong. Please try again. If the issue persists, contact your workspace admin.',
+    consoleMessage: `Unexpected error: ${message}`,
+  }
+}
+
 export function registerListeners(app: App): void {
   app.command('/kudos', async ({ command, ack, respond, client }) => {
-    await ack()
-
-    const workspaceId = command.team_id
-    const { userIds, reason, emoji } = parseKudosCommand(command.text)
-    let channelName = 'unknown'
-
     try {
-      const channelInfo = await client.conversations.info({ channel: command.channel_id }).catch(() => null)
-      channelName = channelInfo?.channel?.name ?? 'unknown'
-    } catch {
-      channelName = 'unknown'
-    }
+      await ack()
 
-    try {
-      for (const toUserId of userIds) {
+      const workspaceId = command.team_id
+      const { userIds, reason, emoji } = parseKudosCommand(command.text)
+
+      // Validate input before processing
+      const validationError = validateKudosInput(userIds, reason)
+      if (validationError) {
+        await respond({
+          text: validationError,
+          response_type: 'ephemeral',
+        })
+        return
+      }
+
+      let channelName = 'unknown'
+      try {
+        const channelInfo = await client.conversations.info({ channel: command.channel_id }).catch(() => null)
+        channelName = channelInfo?.channel?.name ?? 'unknown'
+      } catch {
+        channelName = 'unknown'
+      }
+
+      // Resolve @username mentions to Slack user IDs
+      const { resolved, resolvedNames, unresolved } = await resolveUserIds(userIds, client)
+
+      const successMessages: string[] = []
+      const errorMessages: string[] = []
+
+      for (const [originalUsername, resolvedUserId] of resolved.entries()) {
         try {
-          const userInfo = await client.users.info({ user: toUserId })
-          const toUserName = userInfo.user?.real_name ?? userInfo.user?.name ?? toUserId
+          const userName = resolvedNames.get(originalUsername) ?? originalUsername
 
           const kudos: Kudos = {
             id: generateKudosId(),
             fromUserId: command.user_id,
             fromUserName: command.user_name,
-            toUserId,
-            toUserName,
+            toUserId: resolvedUserId,
+            toUserName: userName,
             reason,
             emoji,
             channelId: command.channel_id,
@@ -71,69 +187,108 @@ export function registerListeners(app: App): void {
           }
 
           await db.createKudos(kudos)
-
-          await respond({
-            text: `:tada: Kudos given to <@${toUserId}> for: "${reason}"`,
-            response_type: 'in_channel',
-            replace_original: false,
-          })
+          successMessages.push(`<@${resolvedUserId}>`)
         } catch (error) {
-          console.error(`Failed to create kudos for user ${toUserId}:`, error)
-          await respond({
-            text: `Failed to give kudos to <@${toUserId}>. They may not exist or the bot lacks permission.`,
-            response_type: 'ephemeral',
-          })
+          console.error(`Failed to create kudos for resolved user ${originalUsername} (${resolvedUserId}):`, error)
+          errorMessages.push(`<@${resolvedUserId}>`)
         }
+      }
+
+      // Add unresolved usernames to error messages
+      for (const unresolvedUser of unresolved) {
+        errorMessages.push(`"${unresolvedUser}"`)
+      }
+
+      // Send a single consolidated in-channel message if any succeeded
+      if (successMessages.length > 0) {
+        const usersText = successMessages.join(', ')
+        const multiSuffix = successMessages.length > 1 ? ' each' : ''
+        await client.chat.postMessage({
+          channel: command.channel_id,
+          text: `:tada: Kudos given to ${usersText}${multiSuffix} for: "${reason}" ${emoji}`,
+        })
+      }
+
+      // Send error messages as ephemeral if any failed
+      if (errorMessages.length > 0) {
+        const failedUsersText = errorMessages.join(', ')
+        const hasUnresolved = unresolved.length > 0
+        let errorText: string
+        if (hasUnresolved) {
+          errorText = `❌ Couldn't find user(s) ${failedUsersText}. This usually means the username is misspelled or they're not in this workspace. Please check the name and try again.`
+        } else {
+          errorText = `❌ Failed to give kudos to ${failedUsersText}. They may not exist or the bot lacks permission.`
+        }
+        await respond({
+          text: errorText,
+          response_type: 'ephemeral',
+        })
       }
 
       await refreshHomeForUser(command.user_id, workspaceId).catch((error) => {
         console.error('Home refresh failed:', error)
       })
     } catch (error) {
-      console.error('Slash command failed:', error)
-      await respond({
-        text: 'Something went wrong while creating kudos. Please try again.',
-        response_type: 'ephemeral',
-      })
+      console.error('Slash command /kudos failed:', error)
+      const { userMessage } = formatErrorMessage(error)
+      try {
+        await respond({
+          text: userMessage,
+          response_type: 'ephemeral',
+        })
+      } catch {
+        console.error('Failed to send error response for /kudos:', error)
+      }
     }
   })
 
   app.command('/kudos-export', async ({ command, ack, respond, client }) => {
-    await ack()
-
-    const workspaceId = command.team_id
-    const parts = command.text.trim().split(/\s+/)
-
-    const startDate = parts[0] ?? ''
-    const endDate = parts[1] ?? ''
-    const channelName = parts[2] ?? ''
-
-    if (!startDate || !endDate) {
-      await respond({
-        text: 'Usage: `/kudos-export YYYY-MM-DD YYYY-MM-DD [@channel_name]`\nExample: `/kudos-export 2024-01-01 2024-01-31`\nExample: `/kudos-export 2024-01-01 2024-01-31 @channel-name`',
-        response_type: 'ephemeral',
-      })
-      return
-    }
-
     try {
-      const start = new Date(startDate).toISOString()
-      const end = new Date(endDate).toISOString()
+      await ack()
+
+      const workspaceId = command.team_id
+      const parts = command.text.trim().split(/\s+/)
+
+      const startDate = parts[0] ?? ''
+      const endDate = parts[1] ?? ''
+      const channelName = parts[2] ?? ''
+
+      if (!startDate || !endDate) {
+        await respond({
+          text: 'Usage: `/kudos-export YYYY-MM-DD YYYY-MM-DD [@channel_name]`\nExample: `/kudos-export 2024-01-01 2024-01-31`\nExample: `/kudos-export 2024-01-01 2024-01-31 @channel-name`',
+          response_type: 'ephemeral',
+        })
+        return
+      }
+
+      // Validate date format
+      const start = new Date(startDate)
+      const end = new Date(endDate)
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+        await respond({
+          text: '❌ Invalid date format. Please use YYYY-MM-DD format.\nExample: `/kudos-export 2024-01-01 2024-01-31`',
+          response_type: 'ephemeral',
+        })
+        return
+      }
+
+      const startIso = start.toISOString()
+      const endIso = end.toISOString()
 
       let kudosList: Kudos[]
       if (channelName && channelName.startsWith('@')) {
         const channelId = await getChannelIdFromName(command.channel_id, channelName.replace(/^@/, ''), client)
         if (channelId) {
-          kudosList = await db.getKudosByDateRangeAndChannel(workspaceId, start, end, channelId)
+          kudosList = await db.getKudosByDateRangeAndChannel(workspaceId, startIso, endIso, channelId)
         } else {
           await respond({
-            text: `Channel ${channelName} not found in the workspace.\nPlease ensure the channel exists and the app is a member. Use /kudos-export without a channel to see all channels.`,
+            text: `❌ Channel ${channelName} not found. The app may not be a member of that channel. Invite @Kudos Digest to the channel and try again.`,
             response_type: 'ephemeral',
           })
           return
         }
       } else {
-        kudosList = await db.getKudosByDateRange(workspaceId, start, end)
+        kudosList = await db.getKudosByDateRange(workspaceId, startIso, endIso)
       }
 
       if (kudosList.length === 0) {
@@ -177,49 +332,61 @@ export function registerListeners(app: App): void {
       })
     } catch (error) {
       console.error('Export failed:', error)
+      const { userMessage } = formatErrorMessage(error)
       await respond({
-        text: 'Failed to export kudos. Please check the date format (YYYY-MM-DD).',
+        text: userMessage + '\n\nPlease check the date format (YYYY-MM-DD) and try again.',
         response_type: 'ephemeral',
       })
     }
   })
 
   app.command('/kudos-export-google', async ({ command, ack, respond }) => {
-    await ack()
-
-    const workspaceId = command.team_id
-    const parts = command.text.trim().split(/\s+/)
-
-    const startDate = parts[0] ?? ''
-    const endDate = parts[1] ?? ''
-    const channelName = parts[2] ?? ''
-
-    if (!startDate || !endDate) {
-      await respond({
-        text: 'Usage: `/kudos-export-google YYYY-MM-DD YYYY-MM-DD [@channel_name]`\nExample: `/kudos-export-google 2024-01-01 2024-01-31`\nExample: `/kudos-export-google 2024-01-01 2024-01-31 @channel-name`',
-        response_type: 'ephemeral',
-      })
-      return
-    }
-
     try {
-      const start = new Date(startDate).toISOString()
-      const end = new Date(endDate).toISOString()
+      await ack()
+
+      const workspaceId = command.team_id
+      const parts = command.text.trim().split(/\s+/)
+
+      const startDate = parts[0] ?? ''
+      const endDate = parts[1] ?? ''
+      const channelName = parts[2] ?? ''
+
+      if (!startDate || !endDate) {
+        await respond({
+          text: 'Usage: `/kudos-export-google YYYY-MM-DD YYYY-MM-DD [@channel_name]`\nExample: `/kudos-export-google 2024-01-01 2024-01-31`\nExample: `/kudos-export-google 2024-01-01 2024-01-31 @channel-name`',
+          response_type: 'ephemeral',
+        })
+        return
+      }
+
+      // Validate date format
+      const start = new Date(startDate)
+      const end = new Date(endDate)
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+        await respond({
+          text: '❌ Invalid date format. Please use YYYY-MM-DD format.\nExample: `/kudos-export-google 2024-01-01 2024-01-31`',
+          response_type: 'ephemeral',
+        })
+        return
+      }
+
+      const startIso = start.toISOString()
+      const endIso = end.toISOString()
 
       let kudosList: Kudos[]
       if (channelName && channelName.startsWith('@')) {
         const channelId = await getChannelIdFromName(command.channel_id, channelName.replace(/^@/, ''), command.client)
         if (channelId) {
-          kudosList = await db.getKudosByDateRangeAndChannel(workspaceId, start, end, channelId)
+          kudosList = await db.getKudosByDateRangeAndChannel(workspaceId, startIso, endIso, channelId)
         } else {
           await respond({
-            text: `Channel ${channelName} not found in the workspace.\nPlease ensure the channel exists and the app is a member. Use /kudos-export-google without a channel to see all channels.`,
+            text: `❌ Channel ${channelName} not found. The app may not be a member of that channel. Invite @Kudos Digest to the channel and try again.`,
             response_type: 'ephemeral',
           })
           return
         }
       } else {
-        kudosList = await db.getKudosByDateRange(workspaceId, start, end)
+        kudosList = await db.getKudosByDateRange(workspaceId, startIso, endIso)
       }
 
       if (kudosList.length === 0) {
@@ -295,8 +462,9 @@ export function registerListeners(app: App): void {
       })
     } catch (error) {
       console.error('Google export failed:', error)
+      const { userMessage } = formatErrorMessage(error)
       await respond({
-        text: 'Failed to export kudos for Google. Please check the date format (YYYY-MM-DD).',
+        text: userMessage + '\n\nPlease check the date format (YYYY-MM-DD) and try again.',
         response_type: 'ephemeral',
       })
     }
@@ -396,208 +564,264 @@ export function registerListeners(app: App): void {
       })
     } catch (error) {
       console.error('Failed to open settings modal:', error)
+      try {
+        await client.chat.postMessage({
+          channel: (body as { user?: { id?: string } }).user?.id ?? '',
+          text: '❌ Failed to open settings. Please try again. If the issue persists, contact your workspace admin.',
+        })
+      } catch {
+        console.error('Failed to send error message for settings modal:', error)
+      }
     }
   })
 
   app.view('settings_modal', async ({ ack, view, client, body }) => {
-    await ack()
-
-    const teamId = (body as { team?: { id?: string } }).team?.id ?? ''
-    const state = view.state.values as Record<
-      string,
-      Record<
-        string,
-        { selected_conversation?: string; selected_option?: { value?: string }; value?: string }
-      >
-    >
-
-    const digestChannel = state.digest_channel_block?.digest_channel?.selected_conversation
-    const digestDay = state.digest_day_block?.digest_day?.selected_option?.value
-    const digestHour = state.digest_hour_block?.digest_hour?.selected_option?.value
-    const aiProvider = state.ai_provider_block?.ai_provider?.selected_option?.value
-    const aiApiKeyVal = state.ai_key_block?.ai_key?.value
-    const aiModelVal = state.ai_model_block?.ai_model?.value
-    const aiBaseUrlVal = state.ai_base_url_block?.ai_base_url?.value
-    const digestStyle = state.digest_style_block?.digest_style?.selected_option?.value
-    const workflowTriggerId = state.workflow_trigger_id_block?.workflow_trigger_id?.value
-
-    const existing = await db.getSettings(teamId)
-    const now = new Date().toISOString()
-
-    await db.saveSettings({
-      workspaceId: teamId,
-      digestChannelId: digestChannel ?? existing?.digestChannelId ?? null,
-      digestDay: digestDay ? parseInt(digestDay, 10) : existing?.digestDay ?? 5,
-      digestHour: digestHour ? parseInt(digestHour, 10) : existing?.digestHour ?? 17,
-      digestMinute: 0,
-      aiProvider: (aiProvider ?? existing?.aiProvider ?? 'none') as 'openai' | 'anthropic' | 'custom' | 'none',
-      aiApiKey: aiApiKeyVal ?? existing?.aiApiKey ?? null,
-      aiModel: aiModelVal ?? existing?.aiModel ?? null,
-      aiBaseUrl: aiBaseUrlVal ?? existing?.aiBaseUrl ?? null,
-      digestStyle: (digestStyle ?? existing?.digestStyle ?? 'simple') as 'simple' | 'creative',
-      workflowTriggerId: workflowTriggerId ?? existing?.workflowTriggerId ?? null,
-      digestPostAt: existing?.digestPostAt ?? null,
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
-    })
-
     try {
-      await client.chat.postMessage({
-        channel: (body as { user?: { id?: string } }).user?.id ?? '',
-        text: ':white_check_mark: Settings saved successfully!',
-      })
-    } catch (error) {
-      console.error('Failed to send confirmation:', error)
-    }
+      await ack()
 
-    await refreshHomeForUser((body as { user?: { id?: string } }).user?.id ?? '', teamId)
+      const teamId = (body as { team?: { id?: string } }).team?.id ?? ''
+      const state = view.state.values as Record<
+        string,
+        Record<
+          string,
+          { selected_conversation?: string; selected_option?: { value?: string }; value?: string }
+        >
+      >
+
+      const digestChannel = state.digest_channel_block?.digest_channel?.selected_conversation
+      const digestDay = state.digest_day_block?.digest_day?.selected_option?.value
+      const digestHour = state.digest_hour_block?.digest_hour?.selected_option?.value
+      const aiProvider = state.ai_provider_block?.ai_provider?.selected_option?.value
+      const aiApiKeyVal = state.ai_key_block?.ai_key?.value
+      const aiModelVal = state.ai_model_block?.ai_model?.value
+      const aiBaseUrlVal = state.ai_base_url_block?.ai_base_url?.value
+      const digestStyle = state.digest_style_block?.digest_style?.selected_option?.value
+      const workflowTriggerId = state.workflow_trigger_id_block?.workflow_trigger_id?.value
+
+      const existing = await db.getSettings(teamId)
+      const now = new Date().toISOString()
+
+      await db.saveSettings({
+        workspaceId: teamId,
+        digestChannelId: digestChannel ?? existing?.digestChannelId ?? null,
+        digestDay: digestDay ? parseInt(digestDay, 10) : existing?.digestDay ?? 5,
+        digestHour: digestHour ? parseInt(digestHour, 10) : existing?.digestHour ?? 17,
+        digestMinute: 0,
+        aiProvider: (aiProvider ?? existing?.aiProvider ?? 'none') as 'openai' | 'anthropic' | 'custom' | 'none',
+        aiApiKey: aiApiKeyVal ?? existing?.aiApiKey ?? null,
+        aiModel: aiModelVal ?? existing?.aiModel ?? null,
+        aiBaseUrl: aiBaseUrlVal ?? existing?.aiBaseUrl ?? null,
+        digestStyle: (digestStyle ?? existing?.digestStyle ?? 'simple') as 'simple' | 'creative',
+        workflowTriggerId: workflowTriggerId ?? existing?.workflowTriggerId ?? null,
+        digestPostAt: existing?.digestPostAt ?? null,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      })
+
+      try {
+        await client.chat.postMessage({
+          channel: (body as { user?: { id?: string } }).user?.id ?? '',
+          text: ':white_check_mark: Settings saved successfully!',
+        })
+      } catch (error) {
+        console.error('Failed to send confirmation:', error)
+      }
+
+      await refreshHomeForUser((body as { user?: { id?: string } }).user?.id ?? '', teamId)
+    } catch (error) {
+      console.error('Failed to save settings:', error)
+      try {
+        await client.chat.postMessage({
+          channel: (body as { user?: { id?: string } }).user?.id ?? '',
+          text: '❌ Failed to save settings. Please try again. If the issue persists, contact your workspace admin.',
+        })
+      } catch {
+        console.error('Failed to send error message for settings save:', error)
+      }
+    }
   })
 
   app.action(/^edit_kudos_/, async ({ body, ack, client }) => {
-    await ack()
+    try {
+      await ack()
 
-    const actingUserId = (body as { user?: { id?: string } }).user?.id
-    const kudosId = String((body as { actions?: { action_id?: string }[] }).actions?.[0]?.action_id ?? '').replace('edit_kudos_', '')
+      const actingUserId = (body as { user?: { id?: string } }).user?.id
+      const kudosId = String((body as { actions?: { action_id?: string }[] }).actions?.[0]?.action_id ?? '').replace('edit_kudos_', '')
 
-    if (!actingUserId || !kudosId) return
+      if (!actingUserId || !kudosId) return
 
-    const kudos = await db.getKudosById(kudosId)
-    if (!kudos) {
-      await client.chat.postMessage({ channel: actingUserId, text: 'Kudos not found.' })
-      return
-    }
+      const kudos = await db.getKudosById(kudosId)
+      if (!kudos) {
+        await client.chat.postMessage({ channel: actingUserId, text: '❌ Kudos not found. It may have been deleted.' })
+        return
+      }
 
-    const allowed = await isAuthorizedForKudos(actingUserId, kudos, client)
-    if (!allowed) {
-      await client.chat.postMessage({ channel: actingUserId, text: 'You are not allowed to edit this kudos.' })
-      return
-    }
+      const allowed = await isAuthorizedForKudos(actingUserId, kudos, client)
+      if (!allowed) {
+        await client.chat.postMessage({ channel: actingUserId, text: '❌ You are not allowed to edit this kudos. Only the sender or a workspace admin can edit it.' })
+        return
+      }
 
-    const triggerId = (body as { trigger_id?: string }).trigger_id ?? ''
+      const triggerId = (body as { trigger_id?: string }).trigger_id ?? ''
 
-    await client.views.open({
-      trigger_id: triggerId,
-      view: {
-        type: 'modal',
-        callback_id: `edit_kudos_modal_${kudosId}`,
-        title: {
-          type: 'plain_text',
-          text: 'Edit Kudos',
-        },
-        blocks: [
-          {
-            type: 'input',
-            block_id: 'reason_block',
-            element: {
-              type: 'plain_text_input',
-              action_id: 'reason',
-              initial_value: kudos.reason,
-            },
-            label: {
-              type: 'plain_text',
-              text: 'Reason',
-            },
-            optional: false,
+      await client.views.open({
+        trigger_id: triggerId,
+        view: {
+          type: 'modal',
+          callback_id: `edit_kudos_modal_${kudosId}`,
+          title: {
+            type: 'plain_text',
+            text: 'Edit Kudos',
           },
-          {
-            type: 'input',
-            block_id: 'emoji_block',
-            element: {
-              type: 'static_select',
-              action_id: 'emoji',
-              options: SUPPORTED_EMOJIS.map((emoji) => ({
-                text: { type: 'plain_text', text: emoji },
-                value: emoji,
-              })),
-              initial_option: { text: { type: 'plain_text', text: kudos.emoji }, value: kudos.emoji },
+          blocks: [
+            {
+              type: 'input',
+              block_id: 'reason_block',
+              element: {
+                type: 'plain_text_input',
+                action_id: 'reason',
+                initial_value: kudos.reason,
+              },
+              label: {
+                type: 'plain_text',
+                text: 'Reason',
+              },
+              optional: false,
             },
-            label: {
-              type: 'plain_text',
-              text: 'Emoji',
+            {
+              type: 'input',
+              block_id: 'emoji_block',
+              element: {
+                type: 'static_select',
+                action_id: 'emoji',
+                options: SUPPORTED_EMOJIS.map((emoji) => ({
+                  text: { type: 'plain_text', text: emoji },
+                  value: emoji,
+                })),
+                initial_option: { text: { type: 'plain_text', text: kudos.emoji }, value: kudos.emoji },
+              },
+              label: {
+                type: 'plain_text',
+                text: 'Emoji',
+              },
+              optional: false,
             },
-            optional: false,
+          ],
+          submit: {
+            type: 'plain_text',
+            text: 'Save',
           },
-        ],
-        submit: {
-          type: 'plain_text',
-          text: 'Save',
+          close: {
+            type: 'plain_text',
+            text: 'Cancel',
+          },
         },
-        close: {
-          type: 'plain_text',
-          text: 'Cancel',
-        },
-      },
-    })
+      })
+    } catch (error) {
+      console.error('Failed to open edit modal:', error)
+      try {
+        await client.chat.postMessage({
+          channel: (body as { user?: { id?: string } }).user?.id ?? '',
+          text: '❌ Failed to open edit modal. Please try again. If the issue persists, contact your workspace admin.',
+        })
+      } catch {
+        console.error('Failed to send error message for edit:', error)
+      }
+    }
   })
 
   app.view(/^edit_kudos_modal_/, async ({ ack, view, body, client }) => {
-    await ack()
+    try {
+      await ack()
 
-    const match = /^edit_kudos_modal_(.+)$/.exec(view.callback_id)
-    const kudosId = match?.[1] ?? ''
-    const actingUserId = (body as { user?: { id?: string } }).user?.id ?? ''
+      const match = /^edit_kudos_modal_(.+)$/.exec(view.callback_id)
+      const kudosId = match?.[1] ?? ''
+      const actingUserId = (body as { user?: { id?: string } }).user?.id ?? ''
 
-    if (!kudosId || !actingUserId) return
+      if (!kudosId || !actingUserId) return
 
-    const kudos = await db.getKudosById(kudosId)
-    if (!kudos) {
-      await client.chat.postMessage({ channel: actingUserId, text: 'Kudos not found.' })
-      return
-    }
+      const kudos = await db.getKudosById(kudosId)
+      if (!kudos) {
+        await client.chat.postMessage({ channel: actingUserId, text: '❌ Kudos not found. It may have been deleted.' })
+        return
+      }
 
-    const allowed = await isAuthorizedForKudos(actingUserId, kudos, client)
-    if (!allowed) {
-      await client.chat.postMessage({ channel: actingUserId, text: 'You are not allowed to edit this kudos.' })
-      return
-    }
+      const allowed = await isAuthorizedForKudos(actingUserId, kudos, client)
+      if (!allowed) {
+        await client.chat.postMessage({ channel: actingUserId, text: '❌ You are not allowed to edit this kudos. Only the sender or a workspace admin can edit it.' })
+        return
+      }
 
-    const values = view.state.values as Record<string, Record<string, { value?: string; selected_option?: { value?: string } }>>
-    const reason = values.reason_block?.reason?.value ?? kudos.reason
-    const emoji = values.emoji_block?.emoji?.selected_option?.value ?? kudos.emoji
+      const values = view.state.values as Record<string, Record<string, { value?: string; selected_option?: { value?: string } }>>
+      const reason = values.reason_block?.reason?.value ?? kudos.reason
+      const emoji = values.emoji_block?.emoji?.selected_option?.value ?? kudos.emoji
 
-    await db.updateKudos(kudosId, reason, emoji)
+      await db.updateKudos(kudosId, reason, emoji)
 
-    await client.chat.postMessage({
-      channel: actingUserId,
-      text: ':white_check_mark: Kudos updated.',
-    })
+      await client.chat.postMessage({
+        channel: actingUserId,
+        text: ':white_check_mark: Kudos updated.',
+      })
 
-    if (kudos.fromUserId) {
-      const teamId = (body as { team?: { id?: string } }).team?.id ?? ''
-      await refreshHomeForUser(kudos.fromUserId, teamId)
+      if (kudos.fromUserId) {
+        const teamId = (body as { team?: { id?: string } }).team?.id ?? ''
+        await refreshHomeForUser(kudos.fromUserId, teamId)
+      }
+    } catch (error) {
+      console.error('Failed to update kudos:', error)
+      try {
+        await client.chat.postMessage({
+          channel: (body as { user?: { id?: string } }).user?.id ?? '',
+          text: '❌ Failed to update kudos. Please try again. If the issue persists, contact your workspace admin.',
+        })
+      } catch {
+        console.error('Failed to send error message for kudos update:', error)
+      }
     }
   })
 
   app.action(/^delete_kudos_/, async ({ body, ack, client }) => {
-    await ack()
+    try {
+      await ack()
 
-    const actingUserId = (body as { user?: { id?: string } }).user?.id
-    const kudosId = String((body as { actions?: { action_id?: string }[] }).actions?.[0]?.action_id ?? '').replace('delete_kudos_', '')
+      const actingUserId = (body as { user?: { id?: string } }).user?.id
+      const kudosId = String((body as { actions?: { action_id?: string }[] }).actions?.[0]?.action_id ?? '').replace('delete_kudos_', '')
 
-    if (!actingUserId || !kudosId) return
+      if (!actingUserId || !kudosId) return
 
-    const kudos = await db.getKudosById(kudosId)
-    if (!kudos) {
-      await client.chat.postMessage({ channel: actingUserId, text: 'Kudos not found.' })
-      return
-    }
+      const kudos = await db.getKudosById(kudosId)
+      if (!kudos) {
+        await client.chat.postMessage({ channel: actingUserId, text: '❌ Kudos not found. It may have been already deleted.' })
+        return
+      }
 
-    const allowed = await isAuthorizedForKudos(actingUserId, kudos, client)
-    if (!allowed) {
-      await client.chat.postMessage({ channel: actingUserId, text: 'You are not allowed to delete this kudos.' })
-      return
-    }
+      const allowed = await isAuthorizedForKudos(actingUserId, kudos, client)
+      if (!allowed) {
+        await client.chat.postMessage({ channel: actingUserId, text: '❌ You are not allowed to delete this kudos. Only the sender or a workspace admin can delete it.' })
+        return
+      }
 
-    await db.deleteKudos(kudosId)
+      await db.deleteKudos(kudosId)
 
-    await client.chat.postMessage({
-      channel: actingUserId,
-      text: ':white_check_mark: Kudos deleted.',
-    })
+      await client.chat.postMessage({
+        channel: actingUserId,
+        text: ':white_check_mark: Kudos deleted.',
+      })
 
-    const teamId = (body as { team?: { id?: string } }).team?.id ?? ''
-    if (kudos.fromUserId) {
-      await refreshHomeForUser(kudos.fromUserId, teamId)
+      const teamId = (body as { team?: { id?: string } }).team?.id ?? ''
+      if (kudos.fromUserId) {
+        await refreshHomeForUser(kudos.fromUserId, teamId)
+      }
+    } catch (error) {
+      console.error('Failed to delete kudos:', error)
+      try {
+        await client.chat.postMessage({
+          channel: (body as { user?: { id?: string } }).user?.id ?? '',
+          text: '❌ Failed to delete kudos. Please try again. If the issue persists, contact your workspace admin.',
+        })
+      } catch {
+        console.error('Failed to send error message for kudos delete:', error)
+      }
     }
   })
 
@@ -612,7 +836,7 @@ export function registerListeners(app: App): void {
       if (!settings?.digestChannelId) {
         await client.chat.postMessage({
           channel: (body as { user?: { id?: string } }).user?.id ?? '',
-          text: 'No digest channel configured. Use the App Home to set up your digest channel.',
+          text: '❌ No digest channel configured. Open the App Home tab and click Settings to set up your digest channel.',
         })
         return
       }
@@ -622,7 +846,7 @@ export function registerListeners(app: App): void {
       if (weeklyKudos.length === 0) {
         await client.chat.postMessage({
           channel: (body as { user?: { id?: string } }).user?.id ?? '',
-          text: 'No kudos found for this week.',
+          text: 'No kudos found for this week. Use `/kudos @user reason` to give kudos!',
         })
         return
       }
@@ -657,7 +881,7 @@ export function registerListeners(app: App): void {
       console.error('Manual digest generation failed:', error)
       await client.chat.postMessage({
         channel: (body as { user?: { id?: string } }).user?.id ?? '',
-        text: 'Failed to generate weekly digest.',
+        text: '❌ Failed to generate weekly digest. Please try again. If the issue persists, contact your workspace admin.',
       })
     }
   })
@@ -803,7 +1027,7 @@ function buildSettingsModal(settings: {
         },
         default_to_current_conversation: false,
         filter: {
-          include: ['public_channels', 'private_channels'],
+          include: ['public', 'private'],
         },
         initial_conversation: settings?.digestChannelId ?? undefined,
       },
@@ -823,17 +1047,17 @@ function buildSettingsModal(settings: {
           text: 'Select day',
         },
         options: [
-          { label: { type: 'plain_text', text: 'Monday' }, value: '1' },
-          { label: { type: 'plain_text', text: 'Tuesday' }, value: '2' },
-          { label: { type: 'plain_text', text: 'Wednesday' }, value: '3' },
-          { label: { type: 'plain_text', text: 'Thursday' }, value: '4' },
-          { label: { type: 'plain_text', text: 'Friday' }, value: '5' },
-          { label: { type: 'plain_text', text: 'Saturday' }, value: '6' },
-          { label: { type: 'plain_text', text: 'Sunday' }, value: '7' },
+          { text: { type: 'plain_text', text: 'Monday' }, value: '1' },
+          { text: { type: 'plain_text', text: 'Tuesday' }, value: '2' },
+          { text: { type: 'plain_text', text: 'Wednesday' }, value: '3' },
+          { text: { type: 'plain_text', text: 'Thursday' }, value: '4' },
+          { text: { type: 'plain_text', text: 'Friday' }, value: '5' },
+          { text: { type: 'plain_text', text: 'Saturday' }, value: '6' },
+          { text: { type: 'plain_text', text: 'Sunday' }, value: '7' },
         ],
         initial_option: settings?.digestDay
           ? {
-              label: { type: 'plain_text', text: getDayName(settings.digestDay) },
+              text: { type: 'plain_text', text: getDayName(settings.digestDay) },
               value: String(settings.digestDay),
             }
           : undefined,
@@ -854,11 +1078,11 @@ function buildSettingsModal(settings: {
           text: 'Select hour',
         },
         options: Array.from({ length: 24 }, (_, i) => ({
-          label: { type: 'plain_text', text: `${i}:00` },
+          text: { type: 'plain_text', text: `${i}:00` },
           value: String(i),
         })),
         initial_option: settings?.digestHour !== undefined
-          ? { label: { type: 'plain_text', text: `${settings.digestHour}:00` }, value: String(settings.digestHour) }
+          ? { text: { type: 'plain_text', text: `${settings.digestHour}:00` }, value: String(settings.digestHour) }
           : undefined,
       },
       label: {
@@ -885,13 +1109,13 @@ function buildSettingsModal(settings: {
           text: 'Select AI provider',
         },
         options: [
-          { label: { type: 'plain_text', text: 'None (Simple Digest)' }, value: 'none' },
-          { label: { type: 'plain_text', text: 'OpenAI' }, value: 'openai' },
-          { label: { type: 'plain_text', text: 'Anthropic' }, value: 'anthropic' },
-          { label: { type: 'plain_text', text: 'Custom (OpenAI-compatible)' }, value: 'custom' },
+          { text: { type: 'plain_text', text: 'None (Simple Digest)' }, value: 'none' },
+          { text: { type: 'plain_text', text: 'OpenAI' }, value: 'openai' },
+          { text: { type: 'plain_text', text: 'Anthropic' }, value: 'anthropic' },
+          { text: { type: 'plain_text', text: 'Custom (OpenAI-compatible)' }, value: 'custom' },
         ],
         initial_option: settings?.aiProvider
-          ? { label: { type: 'plain_text', text: getProviderName(settings.aiProvider) }, value: settings.aiProvider }
+          ? { text: { type: 'plain_text', text: getProviderName(settings.aiProvider) }, value: settings.aiProvider }
           : undefined,
       },
       label: {
@@ -967,11 +1191,11 @@ function buildSettingsModal(settings: {
           text: 'Select style',
         },
         options: [
-          { label: { type: 'plain_text', text: 'Simple' }, value: 'simple' },
-          { label: { type: 'plain_text', text: 'Creative' }, value: 'creative' },
+          { text: { type: 'plain_text', text: 'Simple' }, value: 'simple' },
+          { text: { type: 'plain_text', text: 'Creative' }, value: 'creative' },
         ],
         initial_option: settings?.digestStyle
-          ? { label: { type: 'plain_text', text: settings.digestStyle === 'creative' ? 'Creative' : 'Simple' }, value: settings.digestStyle }
+          ? { text: { type: 'plain_text', text: settings.digestStyle === 'creative' ? 'Creative' : 'Simple' }, value: settings.digestStyle }
           : undefined,
       },
       label: {

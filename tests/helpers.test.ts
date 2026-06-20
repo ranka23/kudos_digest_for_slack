@@ -42,6 +42,20 @@ describe('parseKudosCommand', () => {
     expect(result.emoji).toBe(':tada:')
   })
 
+  it('parses @username format from slash commands', () => {
+    const result = parseKudosCommand('@username Great work!')
+    expect(result.userIds).toEqual(['username'])
+    expect(result.reason).toBe('Great work!')
+    expect(result.emoji).toBe(':tada:')
+  })
+
+  it('parses @username with dots and hyphens', () => {
+    const result = parseKudosCommand('@john.doe @jane_doe Thanks!')
+    expect(result.userIds).toEqual(['john.doe', 'jane_doe'])
+    expect(result.reason).toBe('Thanks!')
+    expect(result.emoji).toBe(':tada:')
+  })
+
   it('handles empty text', () => {
     const result = parseKudosCommand('')
     expect(result.userIds).toEqual([])

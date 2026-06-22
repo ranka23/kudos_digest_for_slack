@@ -37,3 +37,11 @@ export interface KudosExport {
   channel: string
   date: string
 }
+
+export interface Reaction {
+  id: string
+  kudosId: string
+  userId: string
+  reaction: string
+  createdAt: string
+}

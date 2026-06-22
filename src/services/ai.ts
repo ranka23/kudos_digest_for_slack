@@ -38,9 +38,9 @@ class AIService {
     return this.config
   }
 
-  async generateDigest(kudosList: { fromUser: string; toUser: string; reason: string; emoji: string }[]): Promise<string> {
+  async generateDigest(kudosList: { fromUser: string; toUser: string; reason: string; emoji: string }[], reactionCounts?: Record<string, number>): Promise<string> {
     if (!this.openai || !this.settings) {
-      return this.generateSimpleDigest(kudosList)
+      return this.generateSimpleDigest(kudosList, reactionCounts)
     }
 
     try {
@@ -53,7 +53,7 @@ class AIService {
       return this.generateFormattedDigest(kudosList, model)
     } catch (error) {
       console.error('AI digest generation failed, falling back to simple:', error)
-      return this.generateSimpleDigest(kudosList)
+      return this.generateSimpleDigest(kudosList, reactionCounts)
     }
   }
 
@@ -111,15 +111,18 @@ Keep it structured but don't add creative commentary.`
     return content ?? this.generateSimpleDigest(kudosList)
   }
 
-  private generateSimpleDigest(kudosList: { fromUser: string; toUser: string; reason: string; emoji: string }[]): string {
-    const userKudos: Record<string, { count: number; reasons: string[] }> = {}
+  private generateSimpleDigest(kudosList: { fromUser: string; toUser: string; reason: string; emoji: string }[], reactionCounts?: Record<string, number>): string {
+    const userKudos: Record<string, { count: number; reasons: string[]; reactionCount: number }> = {}
 
     for (const kudo of kudosList) {
       if (!userKudos[kudo.toUser]) {
-        userKudos[kudo.toUser] = { count: 0, reasons: [] }
+        userKudos[kudo.toUser] = { count: 0, reasons: [], reactionCount: 0 }
       }
       userKudos[kudo.toUser].count++
       userKudos[kudo.toUser].reasons.push(kudo.reason)
+      if (reactionCounts && reactionCounts[kudo.toUser]) {
+        userKudos[kudo.toUser].reactionCount += reactionCounts[kudo.toUser]
+      }
     }
 
     let digest = '*Weekly Kudos Digest* :tada:\n\n'
@@ -127,11 +130,28 @@ Keep it structured but don't add creative commentary.`
     const sortedUsers = Object.entries(userKudos).sort((a, b) => b[1].count - a[1].count)
 
     for (const [user, data] of sortedUsers) {
-      digest += `*${user}* received ${data.count} kudo${data.count > 1 ? 's' : ''}:\n`
+      digest += `*${user}* received ${data.count} kudo${data.count > 1 ? 's' : ''}`
+      if (data.reactionCount > 0) {
+        digest += ` · ${data.reactionCount} reaction${data.reactionCount > 1 ? 's' : ''}`
+      }
+      digest += ':\n'
       for (const reason of data.reasons) {
         digest += `  - "${reason}"\n`
       }
       digest += '\n'
+    }
+
+    // Most reacted kudos highlight
+    if (reactionCounts) {
+      const sortedByReactions = Object.entries(reactionCounts).sort((a, b) => b[1] - a[1])
+      const topReacted = sortedByReactions.slice(0, 3)
+      if (topReacted.length > 0) {
+        digest += '*🔥 Most Liked*\n'
+        for (const [user, count] of topReacted) {
+          digest += `  ${user} — ${count} reaction${count > 1 ? 's' : ''}\n`
+        }
+        digest += '\n'
+      }
     }
 
     digest += `\nTotal recognition this week: ${kudosList.length} kudos given! :star:`

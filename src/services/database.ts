@@ -1,4 +1,4 @@
-import type { Kudos, Settings } from '../types/index'
+import type { Kudos, Settings, Reaction } from '../types/index'
 import { DatabaseSync } from 'node:sqlite'
 
 class DatabaseService {
@@ -52,6 +52,20 @@ class DatabaseService {
     } catch {
       // column may already exist
     }
+    try {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS reactions (
+          id TEXT PRIMARY KEY,
+          kudosId TEXT NOT NULL,
+          userId TEXT NOT NULL,
+          reaction TEXT NOT NULL,
+          createdAt TEXT NOT NULL,
+          FOREIGN KEY (kudosId) REFERENCES kudos(id)
+        )
+      `)
+    } catch {
+      // table may already exist
+    }
   }
 
   async createKudos(kudos: Kudos): Promise<void> {
@@ -75,11 +89,80 @@ class DatabaseService {
     )
   }
 
-  async getKudosByWorkspace(workspaceId: string, limit: number = 100): Promise<Kudos[]> {
+  async getKudosCount(workspaceId: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized')
-    const stmt = this.db.prepare('SELECT * FROM kudos WHERE workspaceId = ? ORDER BY createdAt DESC LIMIT ?')
-    const rows = stmt.all(workspaceId, limit) as unknown as Kudos[]
+    const stmt = this.db.prepare('SELECT COUNT(*) as count FROM kudos WHERE workspaceId = ?')
+    const row = stmt.get(workspaceId) as { count: number }
+    return row.count
+  }
+
+  async getKudosByWorkspace(workspaceId: string, limit: number = 100, offset: number = 0, sort: 'latest' | 'oldest' | 'reactions' = 'latest'): Promise<Kudos[]> {
+    if (!this.db) throw new Error('Database not initialized')
+    if (sort === 'reactions') {
+      const stmt = this.db.prepare(
+        `SELECT k.*, COUNT(r.id) as reactionCount FROM kudos k LEFT JOIN reactions r ON k.id = r.kudosId WHERE k.workspaceId = ? GROUP BY k.id ORDER BY reactionCount DESC, k.createdAt DESC LIMIT ? OFFSET ?`
+      )
+      const rows = stmt.all(workspaceId, limit, offset) as unknown as Kudos[]
+      return rows
+    }
+    const order = sort === 'latest' ? 'DESC' : 'ASC'
+    const stmt = this.db.prepare(`SELECT * FROM kudos WHERE workspaceId = ? ORDER BY createdAt ${order} LIMIT ? OFFSET ?`)
+    const rows = stmt.all(workspaceId, limit, offset) as unknown as Kudos[]
     return rows
+  }
+
+  async getKudosByWorkspaceWithReactions(workspaceId: string, limit: number = 100, offset: number = 0): Promise<(Kudos & { reactionCount: number })[]> {
+    if (!this.db) throw new Error('Database not initialized')
+    const stmt = this.db.prepare(
+      `SELECT k.*, COUNT(r.id) as reactionCount FROM kudos k LEFT JOIN reactions r ON k.id = r.kudosId WHERE k.workspaceId = ? GROUP BY k.id ORDER BY reactionCount DESC, k.createdAt DESC LIMIT ? OFFSET ?`
+    )
+    const rows = stmt.all(workspaceId, limit, offset) as unknown as (Kudos & { reactionCount: number })[]
+    return rows
+  }
+
+  async searchKudos(workspaceId: string, query: string, limit: number = 100, offset: number = 0): Promise<Kudos[]> {
+    if (!this.db) throw new Error('Database not initialized')
+    const searchTerm = `%${query}%`
+    const stmt = this.db.prepare(
+      `SELECT * FROM kudos WHERE workspaceId = ? AND (toUserName LIKE ? OR fromUserName LIKE ? OR channelName LIKE ? OR reason LIKE ?) ORDER BY createdAt DESC LIMIT ? OFFSET ?`
+    )
+    const rows = stmt.all(workspaceId, searchTerm, searchTerm, searchTerm, searchTerm, limit, offset) as unknown as Kudos[]
+    return rows
+  }
+
+  async addReaction(id: string, kudosId: string, userId: string, reaction: string): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized')
+    // Remove existing reaction from same user for same kudos
+    const delStmt = this.db.prepare('DELETE FROM reactions WHERE kudosId = ? AND userId = ? AND reaction = ?')
+    delStmt.run(kudosId, userId, reaction)
+    const stmt = this.db.prepare('INSERT INTO reactions (id, kudosId, userId, reaction, createdAt) VALUES (?, ?, ?, ?, ?)')
+    stmt.run(id, kudosId, userId, reaction, new Date().toISOString())
+  }
+
+  async removeReaction(kudosId: string, userId: string, reaction: string): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized')
+    const stmt = this.db.prepare('DELETE FROM reactions WHERE kudosId = ? AND userId = ? AND reaction = ?')
+    stmt.run(kudosId, userId, reaction)
+  }
+
+  async getReactionsByKudosId(kudosId: string): Promise<Reaction[]> {
+    if (!this.db) throw new Error('Database not initialized')
+    const stmt = this.db.prepare('SELECT * FROM reactions WHERE kudosId = ?')
+    const rows = stmt.all(kudosId) as unknown as Reaction[]
+    return rows
+  }
+
+  async getReactionsGrouped(kudosIds: string[]): Promise<Record<string, Reaction[]>> {
+    if (!this.db || kudosIds.length === 0) return {}
+    const placeholders = kudosIds.map(() => '?').join(',')
+    const stmt = this.db.prepare(`SELECT * FROM reactions WHERE kudosId IN (${placeholders})`)
+    const rows = stmt.all(...kudosIds) as unknown as Reaction[]
+    const grouped: Record<string, Reaction[]> = {}
+    for (const row of rows) {
+      if (!grouped[row.kudosId]) grouped[row.kudosId] = []
+      grouped[row.kudosId].push(row)
+    }
+    return grouped
   }
 
   async getKudosByDateRange(workspaceId: string, startDate: string, endDate: string): Promise<Kudos[]> {

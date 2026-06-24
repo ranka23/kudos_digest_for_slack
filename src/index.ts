@@ -1,28 +1,43 @@
-import { App } from '@slack/bolt'
+import { App, ExpressReceiver } from '@slack/bolt'
 import { config } from 'dotenv'
 import { db } from './services/database'
 import { registerListeners } from './listeners'
 
 config()
 
-const { SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, SLACK_APP_TOKEN, DATABASE_PATH } = process.env
+const { SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, SLACK_APP_TOKEN, DATABASE_PATH, PORT } = process.env
 
 if (!SLACK_BOT_TOKEN || !SLACK_SIGNING_SECRET) {
   console.error('Missing required environment variables:')
   console.error('  - SLACK_BOT_TOKEN')
   console.error('  - SLACK_SIGNING_SECRET')
-  console.error('\nPlease set these in your .env file or environment.')
+  console.error('\nSee .env.example for all required variables.')
   process.exit(1)
 }
 
+// Create an ExpressReceiver so we can add custom routes (like health check)
+const receiver = new ExpressReceiver({
+  signingSecret: SLACK_SIGNING_SECRET,
+  endpoints: { events: '/slack/events' },
+})
+
+// Health check endpoint for marketplace hosting
+receiver.app.get('/health', (_req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  })
+})
+
 const appOptions: {
   token: string
-  signingSecret: string
+  receiver: ExpressReceiver
   socketMode?: boolean
   appToken?: string
 } = {
   token: SLACK_BOT_TOKEN,
-  signingSecret: SLACK_SIGNING_SECRET,
+  receiver,
 }
 
 if (SLACK_APP_TOKEN) {
@@ -74,7 +89,7 @@ async function main(): Promise<void> {
 
     await verifyToken()
 
-    const port = parseInt(process.env.PORT ?? '3000', 10)
+    const port = parseInt(PORT ?? '3000', 10)
     await app.start(port)
 
     console.log(`Kudos Digest app is running on port ${port}! ⚡️`)

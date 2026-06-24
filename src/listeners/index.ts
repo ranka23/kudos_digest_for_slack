@@ -292,7 +292,7 @@ export function registerListeners(app: App): void {
   })
 
   // ── Sort ────────────────────────────────────────────────────────
-  app.action(/^kudos_sort_(.+)$/, async ({ body, ack, client }) => {
+  app.action('kudos_sort_toggle', async ({ body, ack, client }) => {
     await ack()
     const teamId = (body as { team?: { id?: string } }).team?.id ?? ''
     const userId = (body as { user?: { id?: string } }).user?.id ?? ''
@@ -565,19 +565,7 @@ export function registerListeners(app: App): void {
       const weeklyKudos = await db.getWeeklyKudos(workspaceId, new Date())
       if (weeklyKudos.length === 0) return
       await aiService.configure(settings)
-      // Build reaction counts for workflow digest too
-      const wfKudosIds = weeklyKudos.map((k) => k.id)
-      const wfReactionsGrouped = await db.getReactionsGrouped(wfKudosIds)
-      const wfReactionCounts: Record<string, number> = {}
-      for (const [, reactions] of Object.entries(wfReactionsGrouped)) {
-        for (const r of reactions) {
-          const kudo = weeklyKudos.find((k) => k.id === r.kudosId)
-          if (kudo) {
-            wfReactionCounts[kudo.toUserName] = (wfReactionCounts[kudo.toUserName] ?? 0) + 1
-          }
-        }
-      }
-      const digest = await aiService.generateDigest(weeklyKudos.map((k) => ({ fromUser: k.fromUserName, toUser: k.toUserName, reason: k.reason, emoji: k.emoji })), wfReactionCounts)
+      const digest = await aiService.generateDigest(weeklyKudos.map((k) => ({ fromUser: k.fromUserName, toUser: k.toUserName, reason: k.reason, emoji: k.emoji })))
       await client.chat.postMessage({ channel: settings.digestChannelId, text: digest })
     } catch (error) { console.error('Workflow digest failed:', error) }
   })

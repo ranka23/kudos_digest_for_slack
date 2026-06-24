@@ -5,7 +5,10 @@ _metadata:
 display_information:
   name: Kudos Digest
   description: Capture kudos and generate weekly digests
+  long_description: "Kudos Digest helps your team recognize and celebrate great work. Give kudos to teammates using simple slash commands, and generate weekly AI-powered digests to share wins across the channel.\n\n** Features**\n• `/kudos @user reason` — Give real-time recognition to teammates\n• Home tab with kudos board, search, sort, and pagination\n• Weekly digest generation with AI-powered creative summaries\n• Export kudos to CSV or Google Docs format\n• Reaction support — team members can react to kudos with emojis\n\nPerfect for building a culture of appreciation and recognition in your workplace."
   background_color: "#4A154B"
+  privacy_policy_url: "https://github.com/ranka23/kudos_digest_for_slack/blob/main/PRIVACY.md"
+  support_url: "https://github.com/ranka23/kudos_digest_for_slack/issues"
 
 features:
   app_home:
@@ -15,7 +18,7 @@ features:
 
   bot_user:
     display_name: Kudos Digest
-    always_online: false
+    always_online: true
 
   slash_commands:
     - command: /kudos
@@ -24,36 +27,40 @@ features:
       should_escape: false
 
     - command: /kudos-export
-      description: Export kudos to CSV
-      usage_hint: "[start_date] [end_date] [@channel_name]"
+      description: Export kudos to CSV between two dates
+      usage_hint: "[start_date: mm-dd-yyyy] [end_date: mm-dd-yyyy] [#channel_name]"
       should_escape: false
 
     - command: /kudos-export-google
       description: Export kudos formatted for Google Docs/Sheets
-      usage_hint: "[start_date] [end_date] [@channel_name]"
+      usage_hint: "[start_date: mm-dd-yyyy] [end_date: mm-dd-yyyy] [#channel_name]"
       should_escape: false
 
 oauth_config:
   scopes:
     bot:
       - app_mentions:read
+      - channels:join
+      - channels:read
       - chat:write
       - chat:write.public
       - commands
-      - users:read
-      - users:read.email
-      - channels:read
       - groups:read
       - im:read
       - im:write
       - mpim:read
+      - reactions:read
+      - reactions:write
+      - users:read
 
 settings:
-  org_deploy_enabled: false
+  org_deploy_enabled: true
   socket_mode_enabled: true
   token_rotation_enabled: false
   event_subscriptions:
     bot_events:
       - app_home_opened
+      - reaction_added
+      - reaction_removed
   interactivity:
     is_enabled: true
